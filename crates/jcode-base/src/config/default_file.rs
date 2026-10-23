@@ -478,7 +478,7 @@ cross_provider_failover = "countdown"
 # request. Retries honor Retry-After and use capped exponential backoff.
 # Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
 # max_retries = 8
-# retry_backoff_cap_secs = 30
+# retry_backoff_cap_secs = 1200
 # Request-body compression. Every turn re-uploads the whole conversation; on a
 # slow uplink compression cuts that upload 2-4x and lowers time-to-first-token.
 # "auto" measures your upload speed passively and compresses only when it is

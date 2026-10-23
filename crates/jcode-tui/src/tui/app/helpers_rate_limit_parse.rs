@@ -6,7 +6,7 @@ use super::parse_clock_time_to_duration;
 /// Longest wait a held turn will be parked for before its automatic resume.
 /// Server and body hints beyond this are clamped so a bogus or hostile value
 /// cannot park a turn for days.
-pub(crate) const MAX_TURN_HOLD_SECS: u64 = 24 * 60 * 60;
+pub(crate) const MAX_TURN_HOLD_SECS: u64 = 6 * 60 * 60;
 
 /// Find a JSON object embedded in a formatted provider error (for example
 /// after `response:` or `OpenAI API error 429:`) and read its numeric

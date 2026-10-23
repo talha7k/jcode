@@ -1432,15 +1432,23 @@ pub(in crate::tui::app) fn handle_server_event(
                     .rate_limit_pending_message
                     .as_ref()
                     .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
-            if let Some(reset_duration) = reset_duration
+            if let Some(_reset_duration) = reset_duration
                 && !rate_limit_retry_exhausted
                 && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
                     pending.retry_attempts = pending.retry_attempts.saturating_add(1);
                     pending.is_system
                 })
             {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                let attempts = app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .map(|pending| pending.retry_attempts)
+                    .unwrap_or(1);
+                let backoff_secs = (App::AUTO_RETRY_BASE_DELAY_SECS
+                    * 2u64.pow(attempts.saturating_sub(1).min(10) as u32))
+                .min(App::AUTO_RETRY_MAX_DELAY_SECS);
+                app.rate_limit_reset = Some(Instant::now() + Duration::from_secs(backoff_secs));
+                let rate_limit_line = app.rate_limit_notice_with_nudge(backoff_secs);
                 app.push_display_message(DisplayMessage::system(rate_limit_line));
                 if is_system {
                     app.set_status_notice("Rate limited; queued system retry");

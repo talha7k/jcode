@@ -44,7 +44,7 @@ pub enum FailureKind {
 
 /// Longest rate-limit wait worth holding a turn for. Longer windows (usage
 /// caps that reset in hours or days) are reported to the user instead.
-pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(5 * 60);
+pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(20 * 60);
 
 /// Classify a turn failure message.
 ///

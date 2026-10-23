@@ -1329,7 +1329,7 @@ impl Default for ProviderConfig {
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
-            retry_backoff_cap_secs: 30,
+            retry_backoff_cap_secs: 1200,
             request_compression: "auto".to_string(),
         }
     }
