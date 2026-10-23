@@ -1,0 +1,16 @@
+#!/bin/sh
+# Pre-commit hook: check whether upstream has new commits.
+git fetch upstream --quiet 2>/dev/null || exit 0
+
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse upstream/master 2>/dev/null)
+[ -z "$REMOTE" ] && exit 0
+[ "$LOCAL" = "$REMOTE" ] && exit 0
+
+BEHIND=$(git rev-list --count HEAD..upstream/master 2>/dev/null)
+if [ "$BEHIND" -gt 0 ]; then
+    echo "⚠️  Upstream (1jehuang/jcode) is $BEHIND commit(s) ahead."
+    echo "    Consider rebasing/merging upstream before committing."
+fi
+
+exit 0
