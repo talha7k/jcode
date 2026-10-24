@@ -9,7 +9,37 @@
   <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
 </picture>
 
-# jcode
+# jcode (talha7k fork)
+
+<p>
+  <strong>Fork note — custom changes in this repo</strong><br>
+  This fork tracks <code>1jehuang/jcode</code> upstream and carries the following local customizations:
+</p>
+
+## Fork customizations
+
+- **Long-running rate-limit recovery (~6h)**: bumped `provider.max_retries` default to 35 with a 20-min capped exponential backoff so 429/5xx turns keep retrying for hours instead of dying after 3 attempts (`7848986aa`). Pair with `~/.jcode/config.toml`:
+  ```toml
+  [provider]
+  max_retries = 35            # ~10 ramp-up + capped 15-min intervals ≈ 6h of retries
+  retry_backoff_cap_secs = 900
+  ```
+- **OAuth quota/cost tracking**: local OAuth usage totals refresh independently of the quota cache, plus Anthropic per-account cost estimates (`b2f9f9d8d`, `37d75ff06`).
+- **Gemini todo-schema fixes**: request boundary rejects stale todo schemas and repairs them (`7e6dec1e6`, `fc3812548`).
+- **TUI fixes**: inline diff gutters/whitespace, compact failure connectors, warm OpenAI websocket preservation after interrupted responses, tool-duration coloring.
+- **Swarm ops conventions** (via `~/.jcode/swarm-prompt.md`, not code): retain workers (`retain_agents: true`), pause/resume via `swarm action=stop|resume|salvage`, steer mid-turn with `delivery="interrupt"`. Rate limits are handled in-band by the retry hold above; no sentinel process needed.
+- **Pre-commit hook** (`ea2c2e555`) warns when upstream is ahead.
+
+Sync with upstream:
+
+```bash
+git fetch upstream && git merge upstream/master
+cargo build --release --bin jcode   # /opt/homebrew/bin/jcode symlinks here
+```
+
+---
+
+# jcode (upstream)
 
 <p>
   <strong>High-performance coding agents.</strong><br>
