@@ -44,6 +44,48 @@
 - On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
+## Making a freshly built binary live on this machine (fork-specific)
+
+On this machine the installed `jcode` is a symlink into this repo's build output, so a
+release build becomes live immediately:
+
+```bash
+# 1. Build (already live after this completes - see sanity check below)
+cargo build --release --bin jcode
+
+# 2. Verify which binary PATH resolves to and that it is our build
+which jcode                      # expect /opt/homebrew/bin/jcode
+readlink -f /opt/homebrew/bin/jcode   # expect /Users/talha/Documents/workspace/jcode/target/release/jcode
+jcode version                    # git_hash must match `git rev-parse --short HEAD`
+
+# 3. Restart the shared daemon so `jcode run` and running sessions pick it up
+jcode server stop && jcode serve
+```
+
+Sanity check one-liner (run from the repo root; fails loudly if PATH points elsewhere):
+
+```bash
+cd /Users/talha/Documents/workspace/jcode
+[ "$(readlink -f "$(which jcode)")" = "$PWD/target/release/jcode" ] \
+  && echo OK: fork build is live \
+  || echo MISMATCH: PATH jcode is not this repo's build
+```
+
+Expected output today: `OK: fork build is live`, with `jcode version`'s
+`git_hash` matching the repo HEAD commit (it will be one commit behind if the
+README/docs changed after the last rebuild; that is fine, only source changes
+require a rebuild).
+
+Notes:
+- If `which jcode` does NOT resolve through this repo, re-point the launcher:
+  `ln -sf "$PWD/target/release/jcode" /opt/homebrew/bin/jcode` (or the
+  `~/.local/bin/jcode` launcher documented above, keeping it first in PATH).
+- The daemon (`~/.jcode/builds/shared-server/jcode`) may pin an older copy; use
+  `jcode self-dev --build` per the section above if runtime checks still show the
+  old `git_hash` after a rebuild.
+- `git_hash` in `jcode version` output is the ground truth: it must equal
+  `git rev-parse --short HEAD` of this repo.
+
 ## Verifying a change at runtime
 
 `cargo build` alone proves nothing about behavior. `jcode run` and interactive
