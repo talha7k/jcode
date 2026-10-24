@@ -1,6 +1,8 @@
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
+#[path = "ui_messages/todo_completion.rs"]
+mod todo_completion;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -73,7 +75,7 @@ fn render_single_line_system_notice(
     // readable. Markdown or a newline alone is not a reason to expand a notice.
     if matches!(
         msg.title.as_deref(),
-        Some("Skills" | "Context" | "Support" | "Cloud transfer")
+        Some("Skills" | "Context" | "Support" | "Cloud transfer" | "Todo completion")
     ) || msg.content.starts_with("Shell command · ")
         || msg.content.starts_with("Authentication Status:")
         || (msg.content.contains('\n') && msg.content.contains("/cancel"))
@@ -93,6 +95,16 @@ fn render_single_line_system_notice(
         .starts_with("[auto] Your session was interrupted by a server reload")
     {
         "Server reloaded; resuming interrupted work."
+    } else if ["Reload succeeded (", "Reload complete."]
+        .iter()
+        .any(|prefix| {
+            msg.content
+                .strip_prefix("[auto] ")
+                .unwrap_or(&msg.content)
+                .starts_with(prefix)
+        })
+    {
+        "Reload complete. Resuming your task."
     } else if msg.content.starts_with("Reload complete - continuing") {
         "Reload complete - continuing."
     } else if msg.content.starts_with("📡 Network appears offline") {
@@ -506,11 +518,100 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
     out
 }
 
+/// KV cache notices describe the response directly above them, so render
+/// them as a dim `╰` corner hanging off that response rather than a
+/// standalone notice that reads as a header for what follows.
+fn render_kv_cache_footer(msg: &DisplayMessage, width: u16) -> Option<Vec<Line<'static>>> {
+    let content = msg.content.trim();
+    let body = content
+        .trim_start_matches("⚠️")
+        .trim_start_matches("ℹ️")
+        .trim_start();
+    if !(body.starts_with("KV cache miss") || body.starts_with("KV cache refresh")) {
+        return None;
+    }
+    let warn = content.starts_with("⚠️");
+    let summary = kv_cache_footer_summary(body);
+    let body = summary.as_deref().unwrap_or(body);
+    let prefix = "╰ ";
+    let max = (width as usize).saturating_sub(prefix.len() + 1).max(1);
+    let text = if unicode_width::UnicodeWidthStr::width(body) > max {
+        let mut out = String::new();
+        let mut used = 0;
+        for ch in body.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w + 1 > max {
+                break;
+            }
+            used += w;
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    } else {
+        body.to_string()
+    };
+    let color = if warn {
+        system_message_color()
+    } else {
+        dim_color()
+    };
+    Some(vec![Line::from(vec![
+        Span::styled(prefix, Style::default().fg(dim_color())),
+        Span::styled(text, Style::default().fg(color)),
+    ])])
+}
+
+fn parse_kv_token_count(s: &str) -> Option<f64> {
+    let s = s.trim().trim_start_matches('~');
+    let (num, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1e3),
+        'M' | 'm' => (&s[..s.len() - 1], 1e6),
+        _ => (s, 1.0),
+    };
+    num.replace(',', "").parse::<f64>().ok().map(|n| n * mult)
+}
+
+/// `19K KV cache miss · provider switch · 60% hit` from the full
+/// notice text. Returns None when the notice is not in a recognized shape.
+fn kv_cache_footer_summary(body: &str) -> Option<String> {
+    let kind = if body.starts_with("KV cache refresh") {
+        "KV cache refresh"
+    } else {
+        "KV cache miss"
+    };
+    let reason = body
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(r, _)| r.trim().to_string())?;
+    let missed = body
+        .split_once('~')
+        .and_then(|(_, rest)| rest.split_once(" tokens"))
+        .map(|(n, _)| n.trim().to_string());
+    let hit = body.split_once(" cached / ").and_then(|(before, after)| {
+        let cached = parse_kv_token_count(before.rsplit(' ').next()?)?;
+        let expected = parse_kv_token_count(after.split(' ').next()?)?;
+        (expected > 0.0).then(|| ((cached / expected) * 100.0).round().clamp(0.0, 100.0))
+    });
+    let lead = match missed {
+        Some(missed) => format!("{missed} {kind}"),
+        None => kind.to_string(),
+    };
+    let mut parts = vec![lead, reason];
+    if let Some(hit) = hit {
+        parts.push(format!("{hit:.0}% hit"));
+    }
+    Some(parts.join(" · "))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
+        return lines;
+    }
     if msg.title.as_deref() == Some("OpenAI login")
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
     {
@@ -560,6 +661,9 @@ pub(crate) fn render_system_message(
         return markdown::wrap_lines(lines, width.max(1) as usize);
     }
     if let Some(lines) = render_scheduled_session_message(msg, width) {
+        return lines;
+    }
+    if let Some(lines) = render_kv_cache_footer(msg, width) {
         return lines;
     }
     // Routine notices occupy one row regardless of compact_notifications.
@@ -1103,6 +1207,14 @@ pub(crate) fn render_overnight_message(
     lines
 }
 
+/// Only currently running, session-validated dependencies enter this snapshot.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TodoCardBackgroundTask {
+    pub task_id: String,
+    pub label: String,
+    pub percent: Option<f32>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum TodoCardPayload {
@@ -1116,6 +1228,8 @@ enum TodoCardPayload {
         /// Swarm workers referenced by `TodoItem::assigned_to`.
         #[serde(default)]
         agents: Vec<TodoCardAgent>,
+        #[serde(default)]
+        background_tasks: Vec<TodoCardBackgroundTask>,
     },
     Legacy(Vec<crate::todo::TodoItem>),
 }
@@ -1160,6 +1274,7 @@ impl TodoCardPayload {
         crate::todo::TodoPlan,
         Vec<crate::todo::TodoGoal>,
         Vec<TodoCardAgent>,
+        Vec<TodoCardBackgroundTask>,
     ) {
         match self {
             Self::Current {
@@ -1167,10 +1282,12 @@ impl TodoCardPayload {
                 plan,
                 goals,
                 agents,
-            } => (todos, plan, goals, agents),
+                background_tasks,
+            } => (todos, plan, goals, agents, background_tasks),
             Self::Legacy(todos) => (
                 todos,
                 crate::todo::TodoPlan::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -1329,7 +1446,7 @@ fn render_todos_message_with_cap(
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
-    let (todos, plan, goals, agents) = payload.into_parts();
+    let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
@@ -1381,7 +1498,14 @@ fn render_todos_message_with_cap(
             ));
             let goal = todo_card_goal_for_group(&goals, None);
             push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-            push_stage_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_stage_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
         } else if has_groups {
             lines.push(render_todo_stage_status_header(
                 &all_refs,
@@ -1410,7 +1534,14 @@ fn render_todos_message_with_cap(
                     inner_width,
                 ));
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-                push_todo_item_lines(&mut lines, items, &agents, base_indent, inner_width);
+                push_todo_item_lines(
+                    &mut lines,
+                    items,
+                    &agents,
+                    &background_tasks,
+                    base_indent,
+                    inner_width,
+                );
             }
         } else {
             let goal = todo_card_goal_for_group(&goals, None);
@@ -1423,7 +1554,14 @@ fn render_todos_message_with_cap(
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
-            push_todo_item_lines(&mut lines, &all_refs, &agents, base_indent, inner_width);
+            push_todo_item_lines(
+                &mut lines,
+                &all_refs,
+                &agents,
+                &background_tasks,
+                base_indent,
+                inner_width,
+            );
         }
     }
 
@@ -1537,21 +1675,6 @@ fn todo_goal_score_segments(goal: &crate::todo::TodoGoal) -> Vec<Vec<Span<'stati
         ]);
     }
 
-    // Delivery is progress toward the outcome, not a quality gate. Keep it
-    // visible and visually separate from failures so it cannot read as one.
-    if let Some(state) = goal.delivery_state {
-        let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
-            todo_score_color()
-        } else if state == crate::todo::DeliveryState::Integrated {
-            todo_warning_color()
-        } else {
-            todo_failure_color()
-        };
-        segments.push(vec![
-            Span::styled("Delivery ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(color)),
-        ]);
-    }
     segments
 }
 
@@ -1633,13 +1756,15 @@ fn push_todo_item_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
     agents: &[TodoCardAgent],
+    background_tasks: &[TodoCardBackgroundTask],
     base_indent: &str,
     inner_width: usize,
 ) {
     for todo in todos {
-        lines.push(render_todo_item_line(
+        lines.push(render_todo_item_line_with_background(
             todo,
             agents,
+            background_tasks,
             base_indent,
             inner_width,
         ));
@@ -2172,7 +2297,109 @@ fn render_todo_card_item_line(
     base_indent: &str,
     inner_width: usize,
 ) -> Line<'static> {
-    todo_card_line(todo_card_item_spans(todo, true), base_indent, inner_width)
+    todo_card_line(todo_card_item_spans(todo, false), base_indent, inner_width)
+}
+
+fn todo_running_dependencies<'a>(
+    todo: &crate::todo::TodoItem,
+    tasks: &'a [TodoCardBackgroundTask],
+) -> Vec<&'a TodoCardBackgroundTask> {
+    if !crate::todo::is_incomplete_todo(todo) {
+        return Vec::new();
+    }
+    tasks
+        .iter()
+        .filter(|task| todo.waiting_on.contains(&task.task_id))
+        .collect()
+}
+
+fn render_todo_item_line_with_background(
+    todo: &crate::todo::TodoItem,
+    agents: &[TodoCardAgent],
+    tasks: &[TodoCardBackgroundTask],
+    base_indent: &str,
+    inner_width: usize,
+) -> Line<'static> {
+    let dependencies = todo_running_dependencies(todo, tasks);
+    if dependencies.is_empty() {
+        return render_todo_item_line(todo, agents, base_indent, inner_width);
+    }
+    let mut spans = todo_card_item_spans(todo, false);
+    spans[1] = Span::styled("🕒 ", Style::default().fg(todo_warning_color()));
+    let progress = todo_dependency_progress(
+        &dependencies,
+        inner_width.saturating_sub(12).min(inner_width / 2),
+    );
+    let progress_width = progress.width();
+    if progress_width > 0 {
+        let left_width = inner_width.saturating_sub(progress_width + 2);
+        let mut left = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), left_width);
+        let pad = inner_width.saturating_sub(left.width() + progress_width);
+        left.spans.push(Span::raw(" ".repeat(pad)));
+        left.spans.extend(progress.spans);
+        spans = left.spans;
+    }
+    todo_card_line(spans, base_indent, inner_width)
+}
+
+/// Reuse the info widget's bar cells, colors and used/remaining convention.
+/// Labels and separators are fitted separately so Unicode task names cannot
+/// wrap, even though the shared renderer's fixed label is ASCII-oriented.
+fn todo_dependency_progress(tasks: &[&TodoCardBackgroundTask], width: usize) -> Line<'static> {
+    if width < 10 {
+        return Line::default();
+    }
+    let mut spans = Vec::new();
+    let mut shown = 0;
+    for task in tasks {
+        let used: usize = spans
+            .iter()
+            .map(|span: &Span<'_>| span.content.width())
+            .sum();
+        let remaining = width.saturating_sub(used + if shown > 0 { 2 } else { 0 });
+        if remaining < 10 {
+            break;
+        }
+        let budget = remaining.min(28);
+        if shown > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let label_budget = budget.saturating_sub(15).min(10);
+        let clean_label = task.label.split_whitespace().collect::<Vec<_>>().join(" ");
+        let label =
+            super::truncate_line_with_ellipsis_to_width(&Line::raw(clean_label), label_budget);
+        let label_width = label.width();
+        if label_width > 0 {
+            spans.extend(label.spans);
+            spans.push(Span::raw(" "));
+        }
+        let bar_budget = budget.saturating_sub(label_width + usize::from(label_width > 0));
+        if let Some(percent) = task.percent.filter(|percent| percent.is_finite()) {
+            let used = percent.clamp(0.0, 100.0).round() as u8;
+            let bar = crate::tui::info_widget::render_usage_limit_bar(
+                "",
+                used,
+                100 - used,
+                None,
+                (bar_budget + 7).min(u16::MAX as usize) as u16,
+                crate::config::config().display.usage_display_used(),
+            );
+            spans.extend(bar.spans.into_iter().skip(1));
+        } else {
+            spans.push(Span::styled(
+                "running",
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
+        shown += 1;
+    }
+    if shown < tasks.len() {
+        let suffix = format!(" +{}", tasks.len() - shown);
+        let room = width.saturating_sub(suffix.width());
+        spans = super::truncate_line_with_ellipsis_to_width(&Line::from(spans), room).spans;
+        spans.push(Span::styled(suffix, Style::default().fg(todo_meta_color())));
+    }
+    super::truncate_line_with_ellipsis_to_width(&Line::from(spans), width)
 }
 
 /// Spans for one todo row: two-cell gutter, status glyph, content, and
@@ -2863,7 +3090,11 @@ pub(crate) fn render_background_task_message(
         let clean = strip_ansi_escape_sequences(&output);
         let detail = tools_ui::parse_tool_failure(&clean)
             .map(|failure| {
-                let reason = failure.reason.split_whitespace().collect::<Vec<_>>().join(" ");
+                let reason = failure
+                    .reason
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if reason == parsed.exit_label {
                     reason
                 } else {
@@ -4894,3 +5125,17 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod kv_cache_footer_tests {
+    #[test]
+    fn summarizes_miss_reason_missed_and_hit_pct() {
+        let s = super::kv_cache_footer_summary(
+            "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
+        );
+        assert_eq!(
+            s.as_deref(),
+            Some("19.0K KV cache miss · provider switch · 60% hit")
+        );
+    }
+}
