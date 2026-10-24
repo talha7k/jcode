@@ -111,6 +111,10 @@ name = "test_api"
 path = "src/bin/test_api.rs"
 
 [[bin]]
+name = "swarm_sentinel"
+path = "src/bin/swarm_sentinel.rs"
+
+[[bin]]
 name = "jcode-harness"
 path = "src/bin/harness.rs"
 
